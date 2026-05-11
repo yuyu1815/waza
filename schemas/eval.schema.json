@@ -130,9 +130,11 @@
           "type": "string",
           "enum": [
             "copilot-sdk",
+            "claude-sdk",
+            "codex-sdk",
             "mock"
           ],
-          "description": "Execution engine to use. 'copilot-sdk' for real evaluations, 'mock' for testing."
+          "description": "Execution engine to use. 'copilot-sdk', 'claude-sdk', and 'codex-sdk' for real evaluations, 'mock' for testing."
         },
         "model": {
           "type": "string",
