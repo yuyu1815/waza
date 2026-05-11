@@ -897,6 +897,78 @@ tasks:
 		"--model flag should override spec config model")
 }
 
+func TestResolveRunModel(t *testing.T) {
+	tests := []struct {
+		name          string
+		defaultEngine string
+		input         string
+		want          modelRunConfig
+		wantErr       bool
+	}{
+		{
+			name:          "prefixless preserves configured engine",
+			defaultEngine: "mock",
+			input:         "gpt-4o",
+			want:          modelRunConfig{label: "gpt-4o", engineType: "mock", modelID: "gpt-4o"},
+		},
+		{
+			name:  "prefixless defaults to copilot",
+			input: "gpt-4o",
+			want:  modelRunConfig{label: "gpt-4o", engineType: "copilot-sdk", modelID: "gpt-4o"},
+		},
+		{
+			name:          "copilot is not an alias",
+			defaultEngine: "mock",
+			input:         "copilot/gpt-5.1-codex",
+			wantErr:       true,
+		},
+		{
+			name:          "canonical copilot sdk prefix",
+			defaultEngine: "mock",
+			input:         "copilot-sdk/gpt-5.1-codex",
+			want:          modelRunConfig{label: "copilot-sdk/gpt-5.1-codex", engineType: "copilot-sdk", modelID: "gpt-5.1-codex"},
+		},
+		{
+			name:          "engine prefix overrides configured engine",
+			defaultEngine: "copilot-sdk",
+			input:         "mock/test-model",
+			want:          modelRunConfig{label: "mock/test-model", engineType: "mock", modelID: "test-model"},
+		},
+		{
+			name:  "claude sdk model may contain slashes after engine separator",
+			input: "claude-sdk/vendor/model",
+			want:  modelRunConfig{label: "claude-sdk/vendor/model", engineType: "claude-sdk", modelID: "vendor/model"},
+		},
+		{
+			name:  "codex sdk prefix",
+			input: "codex-sdk/gpt-5.1-codex",
+			want:  modelRunConfig{label: "codex-sdk/gpt-5.1-codex", engineType: "codex-sdk", modelID: "gpt-5.1-codex"},
+		},
+		{
+			name:    "cursor sdk prefix is rejected until implemented",
+			input:   "cursor-sdk/auto",
+			wantErr: true,
+		},
+		{
+			name:    "empty engine is invalid",
+			input:   "/gpt-4o",
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := resolveRunModel(tt.defaultEngine, tt.input)
+			if tt.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
 func TestRunCommand_MultiModelExecution(t *testing.T) {
 	resetRunGlobals()
 
@@ -956,6 +1028,31 @@ func TestRunCommand_NoModelFlagPreservesYAML(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "test-model", cfg["model_id"],
 		"without --model flag, spec config model should be preserved")
+}
+
+func TestRunCommand_ModelPrefixSelectsEngine(t *testing.T) {
+	resetRunGlobals()
+
+	specPath := createTestSpec(t, "copilot-sdk")
+	outFile := filepath.Join(t.TempDir(), "results.json")
+
+	cmd := newRunCommand()
+	cmd.SetArgs([]string{specPath, "--model", "mock/test-model", "--output", outFile})
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+
+	err := cmd.Execute()
+	require.NoError(t, err)
+
+	data, err := os.ReadFile(outFile)
+	require.NoError(t, err)
+
+	var result map[string]any
+	require.NoError(t, json.Unmarshal(data, &result))
+	cfg, ok := result["config"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "mock", cfg["engine_type"])
+	assert.Equal(t, "test-model", cfg["model_id"])
 }
 
 func TestRunCommand_ModelNameInOutputJSON(t *testing.T) {

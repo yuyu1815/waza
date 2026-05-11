@@ -78,6 +78,12 @@ type modelResult struct {
 	outcome *models.EvaluationOutcome
 }
 
+type modelRunConfig struct {
+	label      string
+	engineType string
+	modelID    string
+}
+
 func newRunCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "run [eval.yaml | skill-name]",
@@ -484,39 +490,45 @@ func runCommandForSpec(cmd *cobra.Command, sp skillSpecPath, defaultSkills []str
 		modelsToRun = modelOverrides
 	}
 
-	// Reject duplicate model IDs early
-	if len(modelsToRun) > 1 {
-		seen := make(map[string]bool, len(modelsToRun))
-		for _, m := range modelsToRun {
-			if seen[m] {
-				return nil, fmt.Errorf("duplicate --model value: %q (each model must be unique)", m)
-			}
-			seen[m] = true
+	runModels := make([]modelRunConfig, 0, len(modelsToRun))
+	seen := make(map[string]bool, len(modelsToRun))
+	for _, modelID := range modelsToRun {
+		runModel, err := resolveRunModel(spec.Config.EngineType, modelID)
+		if err != nil {
+			return nil, err
 		}
+		key := runModel.engineType + "/" + runModel.modelID
+		if len(modelsToRun) > 1 {
+			if seen[key] {
+				return nil, fmt.Errorf("duplicate --model value: %q (resolves to %q)", modelID, key)
+			}
+			seen[key] = true
+		}
+		runModels = append(runModels, runModel)
 	}
 
-	multiModel := len(modelsToRun) > 1
+	multiModel := len(runModels) > 1
 
 	// Run evaluation for each model, collecting results
 	var allResults []modelResult
 	var lastErr error
 
-	for _, modelID := range modelsToRun {
-		// Override spec model for this iteration
-		spec.Config.ModelID = modelID
+	for _, runModel := range runModels {
+		spec.Config.EngineType = runModel.engineType
+		spec.Config.ModelID = runModel.modelID
 
 		outcome, err := runSingleModel(cmd, spec, specPath, defaultSkills)
 		if err != nil {
 			var testErr *TestFailureError
 			if errors.As(err, &testErr) {
 				// Test failures are recorded but don't stop a multi-model run
-				allResults = append(allResults, modelResult{modelID: modelID, outcome: outcome})
+				allResults = append(allResults, modelResult{modelID: runModel.label, outcome: outcome})
 				lastErr = err
 				continue
 			}
 			return nil, err
 		}
-		allResults = append(allResults, modelResult{modelID: modelID, outcome: outcome})
+		allResults = append(allResults, modelResult{modelID: runModel.label, outcome: outcome})
 	}
 
 	// Print comparison table when multiple models were evaluated
@@ -570,6 +582,46 @@ func runCommandForSpec(cmd *cobra.Command, sp skillSpecPath, defaultSkills []str
 	}
 
 	return allResults, nil
+}
+
+func resolveRunModel(defaultEngine, modelID string) (modelRunConfig, error) {
+	modelRef, err := models.ParseModelRef(modelID, normalizeEngineName(defaultEngine))
+	if err != nil {
+		return modelRunConfig{}, err
+	}
+
+	modelRef.Engine = normalizeEngineName(modelRef.Engine)
+	if !isSupportedRunEngine(modelRef.Engine) {
+		return modelRunConfig{}, fmt.Errorf("unknown engine type: %s", modelRef.Engine)
+	}
+	label := modelRef.Model
+	if strings.Contains(modelID, "/") {
+		label = modelRef.String()
+	}
+
+	return modelRunConfig{
+		label:      label,
+		engineType: modelRef.Engine,
+		modelID:    modelRef.Model,
+	}, nil
+}
+
+func normalizeEngineName(engine string) string {
+	switch engine := strings.TrimSpace(engine); engine {
+	case "":
+		return "copilot-sdk"
+	default:
+		return engine
+	}
+}
+
+func isSupportedRunEngine(engine string) bool {
+	switch engine {
+	case "mock", "copilot-sdk", "claude-sdk", "codex-sdk":
+		return true
+	default:
+		return false
+	}
 }
 
 // runSingleModel executes a benchmark for one model and returns the outcome.
@@ -641,6 +693,10 @@ func runSingleModel(cmd *cobra.Command, spec *models.EvalSpec, specPath string, 
 		engine = execution.NewCopilotEngineBuilder(spec.Config.ModelID, &execution.CopilotEngineBuilderOptions{
 			NewCopilotClient: newCopilotClientFn, // if nil, uses the real function, otherwise overridable for tests.
 		}).Build()
+	case "claude-sdk":
+		engine = execution.NewClaudeSDKEngine(spec.Config.ModelID)
+	case "codex-sdk":
+		engine = execution.NewCodexSDKEngine(spec.Config.ModelID)
 	default:
 		return nil, fmt.Errorf("unknown engine type: %s", spec.Config.EngineType)
 	}
